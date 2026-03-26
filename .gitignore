@@ -177,3 +177,7 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Eval outputs
+eval/
+evals/

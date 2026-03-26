@@ -300,6 +300,7 @@ def eval_policy(
     sum_rewards = []
     max_rewards = []
     all_successes = []
+    action_smoothness = []  # action smoothness metric
     all_seeds = []
     threads = []  # for video saving threads
     n_episodes_rendered = 0  # for saving the correct number of videos
@@ -364,6 +365,19 @@ def eval_policy(
         max_rewards.extend(batch_max_rewards.tolist())
         batch_successes = einops.reduce((rollout_data["success"] * mask), "b n -> b", "any")
         all_successes.extend(batch_successes.tolist())
+        
+        actions = rollout_data[ACTION] * mask.unsqueeze(-1)
+        action_diffs = actions[:, 1:] - actions[:, :-1]
+        action_diff_norms = torch.norm(action_diffs, dim=-1)
+        valid_mask = mask[:, 1:] * mask[:, :-1]
+        batch_action_smoothness = []
+        for b in range(actions.shape[0]):
+            valid_diffs = action_diff_norms[b][valid_mask[b].bool()]
+            if len(valid_diffs) > 0:
+                batch_action_smoothness.append(valid_diffs.mean().item())
+            else:
+                batch_action_smoothness.append(0.0)  # No valid transitions
+        action_smoothness.extend(batch_action_smoothness)
         if seeds:
             all_seeds.extend(seeds)
         else:
@@ -427,13 +441,15 @@ def eval_policy(
                 "sum_reward": sum_reward,
                 "max_reward": max_reward,
                 "success": success,
+                "action_smoothness": smoothness,
                 "seed": seed,
             }
-            for i, (sum_reward, max_reward, success, seed) in enumerate(
+            for i, (sum_reward, max_reward, success, smoothness, seed) in enumerate(
                 zip(
                     sum_rewards[:n_episodes],
                     max_rewards[:n_episodes],
                     all_successes[:n_episodes],
+                    action_smoothness[:n_episodes],
                     all_seeds[:n_episodes],
                     strict=True,
                 )
@@ -443,6 +459,7 @@ def eval_policy(
             "avg_sum_reward": float(np.nanmean(sum_rewards[:n_episodes])),
             "avg_max_reward": float(np.nanmean(max_rewards[:n_episodes])),
             "pc_success": float(np.nanmean(all_successes[:n_episodes]) * 100),
+            "avg_action_smoothness": float(np.nanmean(action_smoothness[:n_episodes])),
             "eval_s": time.time() - start,
             "eval_ep_s": (time.time() - start) / n_episodes,
         },
@@ -584,10 +601,11 @@ class TaskMetrics(TypedDict):
     sum_rewards: list[float]
     max_rewards: list[float]
     successes: list[bool]
+    action_smoothness: list[float]
     video_paths: list[str]
 
 
-ACC_KEYS = ("sum_rewards", "max_rewards", "successes", "video_paths")
+ACC_KEYS = ("sum_rewards", "max_rewards", "successes", "action_smoothness", "video_paths")
 
 
 def eval_one(
@@ -627,6 +645,7 @@ def eval_one(
         sum_rewards=[ep["sum_reward"] for ep in per_episode],
         max_rewards=[ep["max_reward"] for ep in per_episode],
         successes=[ep["success"] for ep in per_episode],
+        action_smoothness=[ep["action_smoothness"] for ep in per_episode],
         video_paths=task_result.get("video_paths", []),
     )
 
@@ -727,6 +746,7 @@ def eval_policy_all(
         _append("sum_rewards", metrics.get("sum_rewards"))
         _append("max_rewards", metrics.get("max_rewards"))
         _append("successes", metrics.get("successes"))
+        _append("action_smoothness", metrics.get("action_smoothness"))
         # video_paths is list-like
         paths = metrics.get("video_paths", [])
         if paths:
@@ -781,6 +801,7 @@ def eval_policy_all(
             "avg_sum_reward": _agg_from_list(acc["sum_rewards"]),
             "avg_max_reward": _agg_from_list(acc["max_rewards"]),
             "pc_success": _agg_from_list(acc["successes"]) * 100 if acc["successes"] else float("nan"),
+            "avg_action_smoothness": _agg_from_list(acc["action_smoothness"]),
             "n_episodes": len(acc["sum_rewards"]),
             "video_paths": list(acc["video_paths"]),
         }
@@ -790,6 +811,7 @@ def eval_policy_all(
         "avg_sum_reward": _agg_from_list(overall["sum_rewards"]),
         "avg_max_reward": _agg_from_list(overall["max_rewards"]),
         "pc_success": _agg_from_list(overall["successes"]) * 100 if overall["successes"] else float("nan"),
+        "avg_action_smoothness": _agg_from_list(overall["action_smoothness"]),
         "n_episodes": len(overall["sum_rewards"]),
         "eval_s": time.time() - start_t,
         "eval_ep_s": (time.time() - start_t) / max(1, len(overall["sum_rewards"])),
